@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# make api request and handle response
+if response=$(curl -s -w "%{http_code}" "https://pokeapi.co/api/v2/pokemon/" -H "Content-Type: application/json"); then
+http_code="${response: -3}" # Last 3 chars
+body="${response%???}" # Everything except the last 3 chars
+  if [ "$http_code" -eq 200 ]; then
+    echo "$body" > data.json
+  else
+    echo "{\"error\": \"HTTP $http_code\", \"response\": \"$body\"}" > error.json
+  fi
+else
+  echo "{\"error\": \"Request failed\", \"message\": \"Connection error\"}"
+fi
