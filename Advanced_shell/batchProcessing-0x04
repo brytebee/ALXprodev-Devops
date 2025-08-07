@@ -1,0 +1,232 @@
+#!/bin/bash
+
+# Parallel Pokemon fetcher using background processes
+pokemon_list=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+max_concurrent=3  # Limit concurrent requests to be respectful to API
+
+# Create directories
+mkdir -p pokemon_data
+mkdir -p logs
+
+# Initialize tracking
+declare -A job_pids
+declare -A job_status
+log_file="logs/parallel_fetch_$(date +%Y%m%d_%H%M%S).log"
+
+# Function to log messages (thread-safe)
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - [PID:$$] $1" >> "$log_file"
+}
+
+# Function to fetch single Pokemon (runs in background)
+fetch_pokemon_background() {
+    local pokemon_name="$1"
+    local output_file="pokemon_data/${pokemon_name}.json"
+    local status_file="pokemon_data/${pokemon_name}.status"
+    
+    # Create status file to track progress
+    echo "STARTED" > "$status_file"
+    log_message "Background fetch started for $pokemon_name"
+    
+    # Simulate API request with error handling
+    if response=$(timeout 30 curl -s -w "%{http_code}" "https://pokeapi.co/api/v2/pokemon/${pokemon_name}" 2>/dev/null); then
+        http_code="${response: -3}"
+        body="${response%???}"
+        
+        if [ "$http_code" -eq 200 ]; then
+            if echo "$body" | jq . > "$output_file" 2>/dev/null; then
+                echo "SUCCESS" > "$status_file"
+                log_message "SUCCESS: $pokemon_name completed"
+                echo "✅ $pokemon_name fetch completed"
+                exit 0
+            else
+                echo "JSON_ERROR" > "$status_file"
+                log_message "ERROR: Invalid JSON for $pokemon_name"
+                exit 1
+            fi
+        else
+            echo "HTTP_ERROR:$http_code" > "$status_file"
+            log_message "ERROR: HTTP $http_code for $pokemon_name"
+            exit 1
+        fi
+    else
+        echo "NETWORK_ERROR" > "$status_file"
+        log_message "ERROR: Network error for $pokemon_name"
+        exit 1
+    fi
+}
+
+# Function to wait for background jobs with progress monitoring
+wait_for_jobs() {
+    local active_jobs=("$@")
+    
+    while [ ${#active_jobs[@]} -gt 0 ]; do
+        local new_active_jobs=()
+        
+        for pid in "${active_jobs[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                # Job still running
+                new_active_jobs+=("$pid")
+            else
+                # Job finished
+                wait "$pid"
+                local exit_code=$?
+                local pokemon_name="${job_pids[$pid]}"
+                
+                if [ $exit_code -eq 0 ]; then
+                    job_status["$pokemon_name"]="SUCCESS"
+                    echo "Background job for $pokemon_name completed successfully"
+                else
+                    job_status["$pokemon_name"]="FAILED"
+                    echo "Background job for $pokemon_name failed"
+                fi
+            fi
+        done
+        
+        active_jobs=("${new_active_jobs[@]}")
+        
+        # Show progress
+        if [ ${#active_jobs[@]} -gt 0 ]; then
+            echo "Waiting for ${#active_jobs[@]} background jobs to complete..."
+            sleep 1
+        fi
+    done
+}
+
+# Function to manage concurrent job execution
+execute_with_concurrency_limit() {
+    local running_jobs=()
+    local pokemon_queue=("${pokemon_list[@]}")
+    
+    echo "Starting parallel fetch with max $max_concurrent concurrent jobs"
+    echo "Log file: $log_file"
+    echo ""
+    
+    while [ ${#pokemon_queue[@]} -gt 0 ] || [ ${#running_jobs[@]} -gt 0 ]; do
+        # Start new jobs if under limit and queue not empty
+        while [ ${#running_jobs[@]} -lt $max_concurrent ] && [ ${#pokemon_queue[@]} -gt 0 ]; do
+            local pokemon="${pokemon_queue[0]}"
+            pokemon_queue=("${pokemon_queue[@]:1}")  # Remove first element
+            
+            echo "🚀 Starting background fetch for $pokemon"
+            fetch_pokemon_background "$pokemon" &
+            local pid=$!
+            
+            running_jobs+=("$pid")
+            job_pids["$pid"]="$pokemon"
+            
+            log_message "Started background job for $pokemon (PID: $pid)"
+        done
+        
+        # Check for completed jobs
+        local new_running_jobs=()
+        for pid in "${running_jobs[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                new_running_jobs+=("$pid")
+            else
+                wait "$pid"
+                local exit_code=$?
+                local pokemon_name="${job_pids[$pid]}"
+                
+                if [ $exit_code -eq 0 ]; then
+                    job_status["$pokemon_name"]="SUCCESS"
+                else
+                    job_status["$pokemon_name"]="FAILED"
+                fi
+                
+                log_message "Job completed for $pokemon_name (exit: $exit_code)"
+            fi
+        done
+        running_jobs=("${new_running_jobs[@]}")
+        
+        # Small delay to prevent busy waiting
+        sleep 0.5
+    done
+}
+
+# Alternative: Simple parallel execution (all at once)
+execute_all_parallel() {
+    echo "Starting all Pokemon fetches in parallel..."
+    echo "Log file: $log_file"
+    echo ""
+    
+    local pids=()
+    
+    # Start all background jobs
+    for pokemon in "${pokemon_list[@]}"; do
+        echo "🚀 Starting background fetch for $pokemon"
+        fetch_pokemon_background "$pokemon" &
+        local pid=$!
+        pids+=("$pid")
+        job_pids["$pid"]="$pokemon"
+        log_message "Started background job for $pokemon (PID: $pid)"
+    done
+    
+    echo ""
+    echo "All background jobs started. Waiting for completion..."
+    
+    # Wait for all jobs to complete
+    wait_for_jobs "${pids[@]}"
+}
+
+# Cleanup function
+cleanup() {
+    echo ""
+    echo "Cleaning up background processes..."
+    
+    # Kill any remaining background jobs
+    for pid in "${!job_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Terminating job ${job_pids[$pid]} (PID: $pid)"
+            kill "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Clean up status files
+    rm -f pokemon_data/*.status
+}
+
+# Set up signal handlers
+trap cleanup EXIT INT TERM
+
+# Main execution
+echo "=== Pokemon Parallel Fetcher ==="
+echo "Pokemon to fetch: ${pokemon_list[*]}"
+
+# Choose execution method
+if [ "${1:-}" == "--concurrent" ]; then
+    execute_with_concurrency_limit
+else
+    execute_all_parallel
+fi
+
+echo ""
+echo "=== RESULTS SUMMARY ==="
+
+# Generate report
+successful=0
+failed=0
+
+for pokemon in "${pokemon_list[@]}"; do
+    if [ -f "pokemon_data/${pokemon}.json" ]; then
+        echo "✅ $pokemon: SUCCESS"
+        ((successful++))
+    else
+        echo "❌ $pokemon: FAILED"
+        ((failed++))
+        
+        # Show error details if available
+        if [ -f "pokemon_data/${pokemon}.status" ]; then
+            error_status=$(cat "pokemon_data/${pokemon}.status")
+            echo "   └─ Status: $error_status"
+        fi
+    fi
+done
+
+echo ""
+echo "Successful: $successful/${#pokemon_list[@]}"
+echo "Failed: $failed/${#pokemon_list[@]}"
+echo "Log file: $log_file"
+
+# Final log entry
+log_message "SUMMARY: $successful successful, $failed failed out of ${#pokemon_list[@]} total"

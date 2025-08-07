@@ -1,0 +1,149 @@
+# #!/bin/bash
+
+# pokemon_list=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+# mkdir -p pokemon_data
+
+# total=${#pokemon_list[@]}
+# current=0
+
+# for pokemon in "${pokemon_list[@]}"; do
+#     ((current++))
+#     echo "[$current/$total] Fetching data for ${pokemon}..."
+    
+#     if response=$(curl -s -w "%{http_code}" "https://pokeapi.co/api/v2/pokemon/${pokemon}"); then
+#         http_code="${response: -3}"
+#         body="${response%???}"
+        
+#         if [ "$http_code" -eq 200 ]; then
+#             echo "$body" | jq . > "pokemon_data/${pokemon}.json"
+#             echo "Saved data to pokemon_data/${pokemon}.json ✅"
+#         else
+#             echo "Error: HTTP $http_code for $pokemon ❌"
+#         fi
+#     else
+#         echo "Error: Failed to fetch $pokemon ❌"
+#     fi
+    
+#     # Rate limiting delay
+#     [ $current -lt $total ] && sleep 1
+# done
+
+
+#!/bin/bash
+
+# Enhanced Pokemon fetcher with retry logic and error handling
+pokemon_list=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+max_retries=3
+retry_delay=2
+
+# Create directories
+mkdir -p pokemon_data
+mkdir -p logs
+
+# Initialize log file
+log_file="logs/fetch_$(date +%Y%m%d_%H%M%S).log"
+echo "=== Pokemon Fetch Log - $(date) ===" > "$log_file"
+
+# Function to log messages
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$log_file"
+}
+
+# Function to fetch Pokemon with retry logic
+fetch_pokemon_with_retry() {
+    local pokemon_name="$1"
+    local output_file="pokemon_data/${pokemon_name}.json"
+    local attempt=1
+    
+    log_message "Starting fetch for $pokemon_name"
+    
+    while [ $attempt -le $max_retries ]; do
+        echo "Fetching data for ${pokemon_name}... (Attempt $attempt/$max_retries)"
+        
+        # Make API request with timeout
+        if response=$(timeout 30 curl -s -w "%{http_code}" "https://pokeapi.co/api/v2/pokemon/${pokemon_name}" 2>/dev/null); then
+            http_code="${response: -3}"
+            body="${response%???}"
+            
+            case "$http_code" in
+                200)
+                    # Success - validate JSON and save
+                    if echo "$body" | jq . > /dev/null 2>&1; then
+                        echo "$body" | jq . > "$output_file"
+                        echo "Saved data to $output_file ✅"
+                        log_message "SUCCESS: $pokemon_name fetched and saved"
+                        return 0
+                    else
+                        log_message "ERROR: Invalid JSON received for $pokemon_name (attempt $attempt)"
+                    fi
+                    ;;
+                404)
+                    echo "Error: Pokemon '$pokemon_name' not found ❌"
+                    log_message "ERROR: Pokemon $pokemon_name not found (404)"
+                    return 1
+                    ;;
+                429)
+                    echo "Rate limited. Waiting longer before retry..."
+                    log_message "WARN: Rate limited for $pokemon_name (attempt $attempt)"
+                    sleep $((retry_delay * 2))
+                    ;;
+                *)
+                    echo "HTTP Error $http_code for $pokemon_name"
+                    log_message "ERROR: HTTP $http_code for $pokemon_name (attempt $attempt)"
+                    ;;
+            esac
+        else
+            echo "Network error for $pokemon_name"
+            log_message "ERROR: Network/timeout error for $pokemon_name (attempt $attempt)"
+        fi
+        
+        # Increment attempt counter
+        ((attempt++))
+        
+        # Wait before retry (except on last attempt)
+        if [ $attempt -le $max_retries ]; then
+            echo "Retrying in ${retry_delay} seconds..."
+            sleep $retry_delay
+            # Exponential backoff
+            retry_delay=$((retry_delay * 2))
+        fi
+    done
+    
+    # All retries failed
+    echo "Failed to fetch $pokemon_name after $max_retries attempts ❌"
+    log_message "FAILED: $pokemon_name failed after $max_retries attempts"
+    
+    # Create error file
+    echo "{\"error\": \"Failed after $max_retries attempts\", \"pokemon\": \"$pokemon_name\", \"timestamp\": \"$(date -Iseconds)\"}" > "pokemon_data/${pokemon_name}_error.json"
+    
+    return 1
+}
+
+# Main execution
+echo "Starting Pokemon data fetch with retry logic..."
+echo "Max retries: $max_retries"
+echo "Log file: $log_file"
+echo ""
+
+successful=0
+failed=0
+
+for pokemon in "${pokemon_list[@]}"; do
+    if fetch_pokemon_with_retry "$pokemon"; then
+        ((successful++))
+    else
+        ((failed++))
+    fi
+    echo ""
+    # Reset retry delay for next pokemon
+    retry_delay=2
+done
+
+# Summary
+echo "=== FETCH SUMMARY ==="
+echo "Successful: $successful"
+echo "Failed: $failed"
+echo "Log file: $log_file"
+
+log_message "SUMMARY: $successful successful, $failed failed"
+log_message "=== Fetch session completed ==="
