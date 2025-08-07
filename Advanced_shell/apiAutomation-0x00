@@ -7,8 +7,8 @@ body="${response%???}" # Everything except the last 3 chars
   if [ "$http_code" -eq 200 ]; then
     echo "$body" > data.json
   else
-    echo "{\"error\": \"HTTP $http_code\", \"response\": \"$body\"}" > error.json
+    echo "{\"error\": \"HTTP $http_code\", \"response\": \"$body\"}" > errors.txt
   fi
 else
-  echo "{\"error\": \"Request failed\", \"message\": \"Connection error\"}"
+  echo "{\"error\": \"Request failed\", \"message\": \"Connection error\"}" > errors.txt
 fi
