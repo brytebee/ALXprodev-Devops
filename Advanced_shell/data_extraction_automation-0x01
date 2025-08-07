@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Extract data using jq and format with awk/sed
+name=$(jq -r '.name // .forms[0].name' data.json | sed 's/\b\w/\u&/g')
+height=$(jq -r '.height' data.json | awk '{printf "%.1f", $1/10}')
+weight=$(jq -r '.weight' data.json | awk '{printf "%.0f", $1/10}')
+type=$(jq -r '.types[0].type.name' data.json | sed 's/\b\w/\u&/g')
+
+# Format final output
+echo "$name is of type $type, weighs ${weight}kg, and is ${height}m tall."
